@@ -79,6 +79,7 @@ _PAYLOADFORMAT_LONG = "long"
 _PAYLOADFORMAT_REGISTER = "register"
 _PAYLOADFORMAT_REGISTERS = "registers"
 _PAYLOADFORMAT_STRING = "string"
+_PAYLOADFORMAT_DEVICEID = "device id"
 _ALL_PAYLOADFORMATS = [
     _PAYLOADFORMAT_BIT,
     _PAYLOADFORMAT_BITS,
@@ -87,6 +88,7 @@ _ALL_PAYLOADFORMATS = [
     _PAYLOADFORMAT_REGISTER,
     _PAYLOADFORMAT_REGISTERS,
     _PAYLOADFORMAT_STRING,
+    _PAYLOADFORMAT_DEVICEID,
 ]
 
 # ######################## #
@@ -899,6 +901,63 @@ class Instrument:
             number_of_registers=len(values),
             payloadformat=_PAYLOADFORMAT_REGISTERS,
         )
+        
+    def read_device_identification(self, category):
+        """Read device information.
+        
+        Device contains i) basic identification, and possibly
+                        ii) regular identification, and
+                        iii) extended identification.
+        
+        Uses Modbus function code 43 and MEI code 14 (43/14).
+        
+        Args:
+                * category (int): 0 = basic identification
+                                  1 = regular identification
+                                  2 = extended identification
+                * object id (int): The id of the requested object.
+                
+        Returns:
+        
+        Raises:
+            
+        """
+        # Check inputs here
+        
+        # Let's use the generic command, passing the object id as register
+        # address and the category as the value...
+        
+        # TODO: add mei_category to generic_command function
+        
+        # Always start from the beginning:
+        if category == 0:
+            object_id = 0
+        elif category == 1:
+            object_id = 3
+        elif category == 2:
+            object_id = 80
+            
+        device_identification_data = self._generic_command(43, object_id, category,
+                                     payloadformat=_PAYLOADFORMAT_DEVICEID)
+        
+        # Request data until everything is received:
+        while(device_identification_data.more_follows == 255):
+            new_data = self._generic_command(43, device_identification_data.next_object_id, category,
+                                     payloadformat=_PAYLOADFORMAT_DEVICEID)
+            # Copy new data to the existing data struct:
+            for field in new_data.defined_info:
+                device_identification_data.defined_info[field] = new_data.defined_info[field]
+            for field in new_data.raw_info:
+                device_identification_data.raw_info[field] = new_data.raw_info[field]
+            device_identification_data.more_follows = new_data.more_follows
+            device_identification_data.next_object_id = new_data.next_object_id
+            
+        
+        # TODO: clean up the more_follows and next_object_id from the return struct
+        
+        return device_identification_data
+    
+        
 
     # ############### #
     # Generic command #
@@ -948,7 +1007,7 @@ class Instrument:
             serial.SerialException (inherited from IOError)
 
         """
-        ALL_ALLOWED_FUNCTIONCODES = [1, 2, 3, 4, 5, 6, 15, 16]
+        ALL_ALLOWED_FUNCTIONCODES = [1, 2, 3, 4, 5, 6, 15, 16, 43]
         ALLOWED_FUNCTIONCODES = {}
         ALLOWED_FUNCTIONCODES[_PAYLOADFORMAT_BIT] = [1, 2, 5, 15]
         ALLOWED_FUNCTIONCODES[_PAYLOADFORMAT_BITS] = [1, 2, 15]
@@ -957,6 +1016,7 @@ class Instrument:
         ALLOWED_FUNCTIONCODES[_PAYLOADFORMAT_STRING] = [3, 4, 16]
         ALLOWED_FUNCTIONCODES[_PAYLOADFORMAT_LONG] = [3, 4, 16]
         ALLOWED_FUNCTIONCODES[_PAYLOADFORMAT_REGISTERS] = [3, 4, 16]
+        ALLOWED_FUNCTIONCODES[_PAYLOADFORMAT_DEVICEID] = [43]
 
         # Check input values
         _check_functioncode(functioncode, ALL_ALLOWED_FUNCTIONCODES)
@@ -1053,7 +1113,7 @@ class Instrument:
             )
 
         # Check combinations: Number of registers
-        if functioncode in [1, 2, 5, 15] and number_of_registers:
+        if functioncode in [1, 2, 5, 15, 43] and number_of_registers:
             raise ValueError(
                 "The number_of_registers is not valid for this function code. "
                 + "number_of_registers: {0!r}, functioncode {1}.".format(
@@ -1083,7 +1143,7 @@ class Instrument:
             # conversion functions.
 
         # Check combinations: Value
-        if functioncode in [5, 6, 15, 16] and value is None:
+        if functioncode in [5, 6, 15, 16, 43] and value is None:
             raise ValueError(
                 "The input value must be given for this function code. "
                 + "Given {0!r} and {1}.".format(value, functioncode)
@@ -1532,6 +1592,12 @@ def _create_payload(
             + _num_to_onebyte_string(len(registerdata))
             + registerdata
         )
+    if functioncode == 43:
+        return (
+            _num_to_onebyte_string(14) # TODO: allow using other MEIs, not only 14
+            + _num_to_onebyte_string(value)
+            + _num_to_onebyte_string(registeraddress)
+            )
     raise ValueError("Wrong function code: " + str(functioncode))
 
 
@@ -1583,10 +1649,14 @@ def _parse_payload(
         elif payloadformat == _PAYLOADFORMAT_REGISTERS:
             return _bytestring_to_valuelist(registerdata, number_of_registers)
 
-        elif payloadformat == _PAYLOADFORMAT_REGISTER:
+        elif payloadformat == _PAYLOADFORMAT_DEVICEID:
             return _twobyte_string_to_num(
                 registerdata, number_of_decimals, signed=signed
             )
+    if functioncode == 43:
+        registerdata = payload[_NUMBER_OF_BYTES_BEFORE_REGISTERDATA:]
+        if payloadformat == _PAYLOADFORMAT_DEVICEID:
+            return _bytestring_to_deviceIdStruct(registerdata,registeraddress,value)
 
 
 def _embed_payload(slaveaddress, mode, functioncode, payloaddata):
@@ -1810,6 +1880,8 @@ def _predict_response_size(mode, functioncode, payload_to_slave):
         ValueError, TypeError.
 
     """
+    DEVICE_ID_PAYLOAD_LENGTH = 252 # Actual length unknown, but this is the maximum
+    
     MIN_PAYLOAD_LENGTH = 4  # For implemented functioncodes here
     BYTERANGE_FOR_GIVEN_SIZE = slice(2, 4)  # Within the payload
 
@@ -1849,7 +1921,8 @@ def _predict_response_size(mode, functioncode, payload_to_slave):
                 NUMBER_OF_PAYLOAD_BYTES_FOR_BYTECOUNTFIELD
                 + number_of_registers * _NUMBER_OF_BYTES_PER_REGISTER
             )
-
+    elif functioncode == 43:
+        response_payload_size = DEVICE_ID_PAYLOAD_LENGTH
     else:
         raise ValueError(
             "Wrong functioncode: {}. The payload is: {!r}".format(
@@ -2410,6 +2483,54 @@ def _bytestring_to_valuelist(bytestring, number_of_registers):
 
     return values
 
+def _bytestring_to_deviceIdStruct(bytestring, object_id, category):
+    device_id_struct = DeviceIdentification()
+    
+    # read first all fields until number of objects; then read the following fields depending on the number of objects
+    object_ids = {0: "VendorName",
+                  1: "ProductCode",
+                  2: "MajorMinorRevision",
+                  3: "VendorUrl",
+                  4: "ProductName",
+                  5: "ModelName",
+                  6: "UserApplicationName"
+                  }
+    
+    mei_type = ord(bytestring[0])
+    # TODO: check that mei_type is consistent
+    
+    device_id_code = ord(bytestring[1])
+    conformity_level = ord(bytestring[2])
+    device_id_struct.more_follows = ord(bytestring[3])
+    device_id_struct.next_object_id = ord(bytestring[4])
+    num_of_objects = ord(bytestring[5])
+    
+    current_index = 6
+    # Read object data until we reach end:
+    while(current_index+1 < len(bytestring)):
+        # Check that there is room for object ID + object length + object value
+        # = 1 byte + 1 byte + n bytes, n > 0
+        if(len(bytestring) < current_index + 2):
+            raise ValueError("TODO")
+        obj_id = ord(bytestring[current_index])
+        obj_length = ord(bytestring[current_index+1])
+        current_index = current_index + 2
+        obj_value = bytestring[current_index:current_index+obj_length].decode('ASCII')
+        current_index = current_index + obj_length
+        if(obj_id in object_ids):
+            device_id_struct.defined_info[object_ids[obj_id]] = obj_value
+        device_id_struct.raw_info[obj_id] = obj_value
+        
+    return device_id_struct
+        
+        
+        
+        
+class DeviceIdentification:
+    defined_info = dict()
+    raw_info = dict()
+    more_follows = []
+    next_object_id = []
 
 def _now():
     """Return a timestamp for time duration measurements.
