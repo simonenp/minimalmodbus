@@ -1669,7 +1669,7 @@ def _parse_payload(
         elif payloadformat == _PAYLOADFORMAT_REGISTERS:
             return _bytestring_to_valuelist(registerdata, number_of_registers)
 
-        elif payloadformat == _PAYLOADFORMAT_DEVICEID:
+        elif payloadformat == _PAYLOADFORMAT_REGISTER:
             return _twobyte_string_to_num(
                 registerdata, number_of_decimals, signed=signed
             )
