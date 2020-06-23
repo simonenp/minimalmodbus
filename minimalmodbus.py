@@ -902,8 +902,8 @@ class Instrument:
             payloadformat=_PAYLOADFORMAT_REGISTERS,
         )
         
-    def read_device_identification(self, category):
-        """Read device information.
+    def read_device_identification(self, category, object_id=None):
+        """Read device information. See Modbus application protocol 43 / 14.
         
         Device contains i) basic identification, and possibly
                         ii) regular identification, and
@@ -912,33 +912,53 @@ class Instrument:
         Uses Modbus function code 43 and MEI code 14 (43/14).
         
         Args:
-                * category (int): 0 = basic identification
-                                  1 = regular identification
-                                  2 = extended identification
-                * object id (int): The id of the requested object.
+                * category (int): 1 = basic identification
+                                  2 = regular identification
+                                  3 = extended identification
+                                  4 = request one specific identification object
+                * object id (int): The id of the requested object (only when category == 4)
                 
         Returns:
+            
         
         Raises:
             
         """
-        # Check inputs here
+        # Check inputs:
+        if(category > 4 or category < 1):
+            raise ValueError('Category should be an integer between 1 and 4.')
+            
+        if category != 4 and object_id != None:
+            raise ValueError(
+                    'The object_id parameter can be used only for category 4.'
+                )
+        elif category == 4 and object_id == None:
+            raise ValueError(
+                'The object_id must be defined when using category 4.'
+                )
+        
+        if object_id != None and (object_id < 0 or object_id > 255):
+            raise ValueError('Object_id should be an integer between 0 and 255.')
+        
+        # Pass default object_id's for categories 1-3:
+        if category == 1:
+            object_id = 0
+        elif category == 2:
+            object_id = 3
+        elif category == 3:
+            object_id = 128
+        # And if category == 4, we'll use the user-defined object_id.
         
         # Let's use the generic command, passing the object id as register
         # address and the category as the value...
         
         # TODO: add mei_category to generic_command function
-        
-        # Always start from the beginning:
-        if category == 0:
-            object_id = 0
-        elif category == 1:
-            object_id = 3
-        elif category == 2:
-            object_id = 80
+                    
             
         device_identification_data = self._generic_command(43, object_id, category,
                                      payloadformat=_PAYLOADFORMAT_DEVICEID)
+        
+        self._print_debug('More follows: {0}'.format(device_identification_data.more_follows))
         
         # Request data until everything is received:
         while(device_identification_data.more_follows == 255):
@@ -953,9 +973,9 @@ class Instrument:
             device_identification_data.next_object_id = new_data.next_object_id
             
         
-        # TODO: clean up the more_follows and next_object_id from the return struct
-        
-        return device_identification_data
+        return DeviceInfo(device_identification_data.defined_info,
+                          device_identification_data.raw_info,
+                          device_identification_data.conformity_level)
     
         
 
@@ -1463,7 +1483,7 @@ class Instrument:
             self._print_debug(text)
 
         if not answer:
-            raise NoResponseError("No communication with the instrument (no answer)")
+            raise NoResponseError("No communication with the instrument (no answer). Try increasing the serial timeout value.")
 
         return answer
 
@@ -1882,7 +1902,7 @@ def _predict_response_size(mode, functioncode, payload_to_slave):
     """
     DEVICE_ID_PAYLOAD_LENGTH = 252 # Actual length unknown, but this is the maximum
     
-    MIN_PAYLOAD_LENGTH = 4  # For implemented functioncodes here
+    MIN_PAYLOAD_LENGTH = 3  # For implemented functioncodes here
     BYTERANGE_FOR_GIVEN_SIZE = slice(2, 4)  # Within the payload
 
     NUMBER_OF_PAYLOAD_BYTES_IN_WRITE_CONFIRMATION = 4
@@ -2484,9 +2504,9 @@ def _bytestring_to_valuelist(bytestring, number_of_registers):
     return values
 
 def _bytestring_to_deviceIdStruct(bytestring, object_id, category):
-    device_id_struct = DeviceIdentification()
+    device_id_struct = DeviceId()
     
-    # read first all fields until number of objects; then read the following fields depending on the number of objects
+    # Predefined object ids:
     object_ids = {0: "VendorName",
                   1: "ProductCode",
                   2: "MajorMinorRevision",
@@ -2496,41 +2516,53 @@ def _bytestring_to_deviceIdStruct(bytestring, object_id, category):
                   6: "UserApplicationName"
                   }
     
-    mei_type = ord(bytestring[0])
+
     # TODO: check that mei_type is consistent
     
-    device_id_code = ord(bytestring[1])
-    conformity_level = ord(bytestring[2])
-    device_id_struct.more_follows = ord(bytestring[3])
-    device_id_struct.next_object_id = ord(bytestring[4])
-    num_of_objects = ord(bytestring[5])
+    #device_id_code = ord(bytestring[0])
+    device_id_struct.conformity_level = ord(bytestring[1])
+    device_id_struct.more_follows = ord(bytestring[2])
+    device_id_struct.next_object_id = ord(bytestring[3])
+    #num_of_objects = ord(bytestring[4])
+            
     
-    current_index = 6
+    current_index = 5
     # Read object data until we reach end:
     while(current_index+1 < len(bytestring)):
-        # Check that there is room for object ID + object length + object value
+        # Check that there is data for object ID + object length + object value
         # = 1 byte + 1 byte + n bytes, n > 0
         if(len(bytestring) < current_index + 2):
-            raise ValueError("TODO")
+            raise InvalidResponseError(
+            "Too short Modbus response (minimum length {} bytes). Response: {!r}".format(
+                current_index + 2, bytestring
+            ))
         obj_id = ord(bytestring[current_index])
         obj_length = ord(bytestring[current_index+1])
         current_index = current_index + 2
-        obj_value = bytestring[current_index:current_index+obj_length].decode('ASCII')
+        obj_value = bytestring[current_index:current_index+obj_length]
         current_index = current_index + obj_length
         if(obj_id in object_ids):
             device_id_struct.defined_info[object_ids[obj_id]] = obj_value
         device_id_struct.raw_info[obj_id] = obj_value
         
     return device_id_struct
+
         
         
-        
-        
-class DeviceIdentification:
-    defined_info = dict()
-    raw_info = dict()
-    more_follows = []
-    next_object_id = []
+class DeviceId:
+    def __init__(self):
+        self.defined_info = dict()
+        self.raw_info = dict()
+        self.more_follows = []
+        self.next_object_id = []
+        self.conformity_level = []
+
+# Same as DeviceId, but without metadata:
+class DeviceInfo:
+    def __init__(self, defined_info, raw_info, conformity_level):
+        self.defined_info = defined_info
+        self.raw_info = raw_info
+        self.conformity_level = conformity_level
 
 def _now():
     """Return a timestamp for time duration measurements.
